@@ -1,7 +1,7 @@
 [project]
 name = "int8-lora"
-description = "Store LoRA and LoKr files as INT8 to roughly halve their size on disk. Quantizer and loader nodes."
-version = "0.1.0"
+description = "Save disk space by storing LoRA and LoKr files as INT8: about half the size for bf16/fp16, a quarter for fp32. Quantizer, folder batch and loader nodes. Storage saving only; VRAM use is unchanged."
+version = "0.2.0"
 license = { file = "LICENSE" }
 dependencies = []
 
@@ -10,4 +10,4 @@ Repository = "https://github.com/bakapotatolord/ComfyUI-INT8-LoRA"
 
 [tool.comfy]
 PublisherId = "bakapotatolord"
-DisplayName = "INT8 LoRA"
+DisplayName = "LoRA INT8 Quantizer & Loader"

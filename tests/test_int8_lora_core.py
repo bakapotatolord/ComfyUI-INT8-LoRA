@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -24,12 +24,16 @@ def make_lora(dtype=torch.bfloat16):
     }
 
 
+def load_tensors(path):
+    return core.load_int8_lora_with_metadata(path)[0]
+
+
 def save_and_load(tensors, meta):
     """Write an INT8 file to a temp dir and load it back."""
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "x.safetensors")
         core.save_int8_lora(path, tensors, meta)
-        return core.load_int8_lora(path)
+        return load_tensors(path)
 
 
 def assert_report_matches_file(test, sd, tensors, meta, report):
@@ -144,7 +148,7 @@ class FileTests(unittest.TestCase):
             plain = os.path.join(d, "plain.safetensors")
             save_file({"a": torch.ones(2, 2)}, plain)
             with self.assertRaises(ValueError):
-                core.load_int8_lora(plain)
+                load_tensors(plain)
 
             tensors, meta, _ = core.quantize_state_dict(make_lora())
             for key, value in (
@@ -155,7 +159,7 @@ class FileTests(unittest.TestCase):
                 path = os.path.join(d, f"{key}.safetensors")
                 core.save_int8_lora(path, tensors, {**meta, key: value})
                 with self.assertRaises(ValueError):
-                    core.load_int8_lora(path)
+                    load_tensors(path)
 
     def test_rejects_missing_scale_and_orphan_scale(self):
         tensors, meta, _ = core.quantize_state_dict(make_lora())
@@ -165,14 +169,14 @@ class FileTests(unittest.TestCase):
             p1 = os.path.join(d, "missing.safetensors")
             core.save_int8_lora(p1, missing, meta)
             with self.assertRaises(ValueError):
-                core.load_int8_lora(p1)
+                load_tensors(p1)
 
             orphan = dict(tensors)
             del orphan["layer.lora_up.weight"]
             p2 = os.path.join(d, "orphan.safetensors")
             core.save_int8_lora(p2, orphan, meta)
             with self.assertRaises(ValueError):
-                core.load_int8_lora(p2)
+                load_tensors(p2)
 
 
 def outlier_lora(dtype=torch.bfloat16):
@@ -253,7 +257,7 @@ class ConvRotTests(unittest.TestCase):
             path = os.path.join(d, "bad.safetensors")
             core.save_int8_lora(path, tensors, {**meta, core.META_CONVROT_GROUP: "100"})
             with self.assertRaises(ValueError):
-                core.load_int8_lora(path)
+                load_tensors(path)
 
 
 class AutoRotationTests(unittest.TestCase):
@@ -315,8 +319,6 @@ class MetadataTests(unittest.TestCase):
             path = os.path.join(d, "m.safetensors")
             core.save_int8_lora(path, tensors, meta)
             state, back = core.load_int8_lora_with_metadata(path)
-            plain = core.load_int8_lora(path)
-        self.assertEqual(set(state), set(plain))
         return meta, back, report
 
     def test_source_metadata_is_carried_over_and_returned(self):
@@ -358,6 +360,101 @@ class MetadataTests(unittest.TestCase):
             torch.save({"w": torch.ones(2, 2)}, pickle_file)
             self.assertEqual(core.read_source_metadata(pickle_file), {})
             self.assertEqual(core.read_source_metadata(os.path.join(d, "missing")), {})
+
+
+class BatchTests(unittest.TestCase):
+    NAMES = ["a.safetensors", "styles\\x.safetensors", "styles/deep\\y.safetensors", "other/z.pt"]
+
+    def test_subfolders_include_every_depth_and_skip_the_root(self):
+        self.assertEqual(core.lora_subfolders(self.NAMES), ["other", "styles", "styles/deep"])
+
+    def test_select_in_folder_is_recursive_and_exact(self):
+        self.assertEqual(
+            core.select_in_folder(self.NAMES, "styles"),
+            ["styles\\x.safetensors", "styles/deep\\y.safetensors"],
+        )
+        self.assertEqual(core.select_in_folder(self.NAMES, "styles/deep"), ["styles/deep\\y.safetensors"])
+        self.assertEqual(core.select_in_folder(self.NAMES, "style"), [])  # no partial names
+
+    def test_relative_output_path_keeps_the_subfolder(self):
+        self.assertEqual(core.int8_relative_path("styles\\deep\\y.pt"), "styles/deep/y_int8.safetensors")
+        self.assertEqual(core.int8_relative_path("a.safetensors"), "a_int8.safetensors")
+
+    def test_candidate_check(self):
+        core.check_batch_candidate(["x.lora_up.weight", "x.lora_down.weight"])
+        core.check_batch_candidate(["x.lokr_w1", "x.lokr_w2"])
+        core.check_batch_candidate(["x.diff", "x.diff_b"])  # full-weight diff LoRA
+        for keys, reason in (
+            (["model.diffusion_model.x.weight"], "look like a LoRA"),
+            (["diffusion_model.blocks.0.attn.weight"], "look like a LoRA"),  # checkpoint
+            (["x.lora_up.weight", "x.lora_up.weight" + core.SCALE_SUFFIX], "already an INT8"),
+        ):
+            with self.assertRaisesRegex(ValueError, reason):
+                core.check_batch_candidate(keys)
+
+    def test_run_batch_skips_failures_and_keeps_going(self):
+        sd = make_lora()
+        report = core.quantize_state_dict(sd)[2]
+
+        def process(name):
+            if name == "bad":
+                raise ValueError("first line\nsecond line")
+            if name == "exists":
+                raise FileExistsError()
+            return report
+
+        ticks = []
+        entries = core.run_batch(["ok1", "bad", "exists", "ok2"], process, lambda: ticks.append(1))
+        self.assertEqual([bool(e.skipped) for e in entries], [False, True, True, False])
+        self.assertEqual(entries[1].skipped, "first line")  # only the first line
+        self.assertEqual(entries[2].skipped, "FileExistsError")  # falls back to the type
+        self.assertEqual(len(ticks), 4)
+        text = core.format_batch_report("styles", entries)
+        self.assertIn("2 quantized, 2 skipped", text)
+        self.assertIn("skip  bad | first line", text)
+        self.assertIn("ok    ok1 -> ok1_int8.safetensors", text)
+        self.assertIn("total:", text)
+
+    def test_cancel_is_not_swallowed(self):
+        class Cancel(BaseException):  # like ComfyUI's InterruptProcessingException
+            pass
+
+        def process(name):
+            raise Cancel()
+
+        with self.assertRaises(Cancel):
+            core.run_batch(["a"], process)
+
+    def test_end_to_end_on_real_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = os.path.join(root, "styles")
+            os.makedirs(folder)
+            good = os.path.join(folder, "good.safetensors")
+            save_file(make_lora(), good, metadata={"ss_x": "1"})
+            save_file({"model.layer.weight": torch.randn(64, 64)}, os.path.join(folder, "model.safetensors"))
+            torch.save({"w": torch.ones(2, 2)}, os.path.join(folder, "old.pt"))
+            tensors, meta, _ = core.quantize_state_dict(make_lora())
+            core.save_int8_lora(os.path.join(folder, "already.safetensors"), tensors, meta)
+
+            def process(name):
+                path = os.path.join(root, *name.split("/"))
+                keys = core.safetensors_keys(path)
+                if keys is None:
+                    raise ValueError("not a readable .safetensors file")
+                core.check_batch_candidate(keys)
+                _, _, report = core.quantize_state_dict(
+                    load_file(path), source_metadata=core.read_source_metadata(path)
+                )
+                return report
+
+            names = [f"styles/{n}" for n in ("already.safetensors", "good.safetensors", "model.safetensors", "old.pt")]
+            entries = {e.name: e for e in core.run_batch(names, process)}
+
+        self.assertEqual(entries["styles/good.safetensors"].skipped, "")
+        self.assertEqual(entries["styles/good.safetensors"].report.carried_metadata, 1)
+        self.assertEqual(entries["styles/already.safetensors"].skipped, "already an INT8 LoRA")
+        self.assertEqual(entries["styles/model.safetensors"].skipped, "does not look like a LoRA")
+        self.assertEqual(entries["styles/old.pt"].skipped, "not a readable .safetensors file")
 
 
 class NameTests(unittest.TestCase):

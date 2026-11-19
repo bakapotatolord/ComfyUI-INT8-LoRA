@@ -18,7 +18,9 @@ Summary of the format (version 1):
 
 from __future__ import annotations
 
+import os
 from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -488,7 +490,7 @@ def _validate_metadata(
 
 
 def load_int8_lora_with_metadata(
-    path: str, device: str = "cpu"
+    path: str,
 ) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
     """Load an INT8 LoRA file.
 
@@ -513,20 +515,14 @@ def load_int8_lora_with_metadata(
             if scale_key in scale_keys:
                 if tensor.dtype != torch.int8:
                     raise ValueError(f"{path}: '{key}' has a scale but is {tensor.dtype}")
-                q = tensor.to(device)
-                scale = f.get_tensor(scale_key).to(device)
-                out[key] = dequantize_absmax(q, scale, dtype, rotation, max_group)
+                scale = f.get_tensor(scale_key)
+                out[key] = dequantize_absmax(tensor, scale, dtype, rotation, max_group)
             else:
                 if tensor.dtype == torch.int8:
                     raise ValueError(f"{path}: int8 tensor '{key}' has no scale")
-                out[key] = tensor.to(device)
+                out[key] = tensor
     source = {k: v for k, v in header.items() if not k.startswith(META_PREFIX)}
     return out, source
-
-
-def load_int8_lora(path: str, device: str = "cpu") -> dict[str, torch.Tensor]:
-    """Load an INT8 LoRA file and return an ordinary float state dict."""
-    return load_int8_lora_with_metadata(path, device)[0]
 
 
 def sanitize_output_name(name: str, fallback_stem: str) -> str:
@@ -537,3 +533,126 @@ def sanitize_output_name(name: str, fallback_stem: str) -> str:
     if not name or name in {".", ".."} or any(c in name for c in '/\\:*?"<>|'):
         raise ValueError(f"invalid output name: {name!r}")
     return name + ".safetensors"
+
+
+# --------------------------------------------------------------------------
+# Batch helpers (pure; the folder node in nodes.py does the file I/O)
+# --------------------------------------------------------------------------
+
+# A file is treated as a LoRA-like adapter if any tensor name contains one of
+# these (kohya/PEFT "lora_*", LyCORIS "lokr_*"/"hada_*") or ends with a full-weight
+# diff suffix. The diff suffixes must match the END of the name: a plain ".diff"
+# substring would also match ".diffusion_model" in ordinary checkpoints.
+_LORA_KEY_MARKERS = ("lora", "lokr", "hada")
+_DIFF_KEY_SUFFIXES = (".diff", ".diff_b")
+
+
+def _norm(path: str) -> str:
+    """ComfyUI lists files with the OS separator; compare with '/' everywhere."""
+    return path.replace("\\", "/")
+
+
+def lora_subfolders(names: Iterable[str]) -> list[str]:
+    """Every folder, at any depth, that holds at least one of ``names``.
+
+    ``names`` are paths relative to the loras folder, as ComfyUI lists them.
+    Files directly in the loras folder have no subfolder and are ignored.
+    """
+    folders: set[str] = set()
+    for name in names:
+        parts = _norm(name).split("/")[:-1]
+        for depth in range(1, len(parts) + 1):
+            folders.add("/".join(parts[:depth]))
+    return sorted(folders)
+
+
+def select_in_folder(names: Iterable[str], folder: str) -> list[str]:
+    """The ``names`` that live in ``folder`` or any folder below it."""
+    prefix = _norm(folder).strip("/") + "/"
+    return [n for n in names if _norm(n).startswith(prefix)]
+
+
+def int8_relative_path(name: str) -> str:
+    """Output path for a source LoRA, keeping its subfolder:
+    ``styles/a.safetensors`` -> ``styles/a_int8.safetensors``."""
+    *folders, file_name = _norm(name).split("/")
+    stem = os.path.splitext(file_name)[0]
+    return "/".join([*folders, f"{stem}_int8.safetensors"])
+
+
+def safetensors_keys(path: str) -> list[str] | None:
+    """Tensor names of a safetensors file (reads only the header), or ``None`` if
+    the file is not a readable safetensors file."""
+    try:
+        with safe_open(path, framework="pt", device="cpu") as f:
+            return list(f.keys())
+    except Exception:
+        return None
+
+
+def check_batch_candidate(keys: Iterable[str]) -> None:
+    """Raise ``ValueError`` (with the reason) if a file should be skipped."""
+    keys = list(keys)
+    if any(k.endswith(SCALE_SUFFIX) for k in keys):
+        raise ValueError("already an INT8 LoRA")
+    if not any(
+        k.endswith(_DIFF_KEY_SUFFIXES) or any(m in k for m in _LORA_KEY_MARKERS)
+        for k in keys
+    ):
+        raise ValueError("does not look like a LoRA")
+
+
+@dataclass
+class BatchEntry:
+    name: str
+    report: QuantizeReport | None = None
+    skipped: str = ""  # reason; empty means the file was quantized
+
+
+def run_batch(
+    names: Iterable[str],
+    process: Callable[[str], QuantizeReport],
+    on_progress: Callable[[], None] | None = None,
+) -> list[BatchEntry]:
+    """Run ``process(name) -> report`` for every name.
+
+    A file that raises is recorded as skipped with the reason and the batch goes
+    on. (ComfyUI's cancel signal derives from ``BaseException``, so it is not
+    caught here and still stops the whole batch.)
+    """
+    entries: list[BatchEntry] = []
+    for name in names:
+        try:
+            entries.append(BatchEntry(name, process(name)))
+        except Exception as exc:
+            first_line = (str(exc).splitlines() or [""])[0]
+            entries.append(BatchEntry(name, skipped=(first_line or type(exc).__name__)[:160]))
+        if on_progress is not None:
+            on_progress()
+    return entries
+
+
+def format_batch_report(folder: str, entries: list[BatchEntry]) -> str:
+    """Human-readable summary of a folder run: one line per file plus totals."""
+    mib = 1024 * 1024
+    done = [e for e in entries if not e.skipped]
+    lines = [f"folder '{folder}': {len(done)} quantized, {len(entries) - len(done)} skipped"]
+    before = after = 0
+    for e in entries:
+        if e.skipped:
+            lines.append(f"skip  {_norm(e.name)} | {e.skipped}")
+            continue
+        r = e.report
+        before += r.bytes_before
+        after += r.bytes_after
+        lines.append(
+            f"ok    {_norm(e.name)} -> {int8_relative_path(e.name)} | "
+            f"{r.bytes_before / mib:.1f} -> {r.bytes_after / mib:.1f} MiB | "
+            f"relative SSE {r.relative_sse:.3e} | rotation {r.rotation}"
+        )
+    if done:
+        lines.append(
+            f"total: {before / mib:.1f} MiB -> {after / mib:.1f} MiB "
+            f"({100.0 * after / max(before, 1):.1f}% of original)"
+        )
+    return "\n".join(lines)
