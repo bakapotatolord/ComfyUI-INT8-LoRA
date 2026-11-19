@@ -5,6 +5,11 @@ for bf16/fp16 LoRAs and about a quarter for fp32 LoRAs**. Files are dequantized
 in memory when loaded and applied through ComfyUI's normal LoRA path. Nothing in
 ComfyUI is monkeypatched.
 
+> **Heads up:** this node pack was written with AI assistance. I ran it on my own
+> MOSS and Anima LoRAs and compared generations, and it comes with a unit test
+> suite, but I can't promise it covers every setup. Please check results on your
+> own LoRAs and keep your originals.
+
 | Source dtype | Size after INT8 | Example (measured) |
 | --- | --- | --- |
 | fp32 | ~25% | 1134.0 MiB -> 283.7 MiB |
