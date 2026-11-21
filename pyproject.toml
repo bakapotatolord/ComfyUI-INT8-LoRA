@@ -1,7 +1,7 @@
 [project]
 name = "int8-lora"
 description = "Save disk space by storing LoRA and LoKr files as INT8: about half the size for bf16/fp16, a quarter for fp32. Quantizer, folder batch and loader nodes. Storage saving only; VRAM use is unchanged."
-version = "0.2.0"
+version = "0.3.0"
 license = { file = "LICENSE" }
 dependencies = []
 

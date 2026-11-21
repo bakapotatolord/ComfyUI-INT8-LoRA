@@ -265,7 +265,7 @@ report lists each skipped file with its reason.
 
 ## Changes
 
-### 0.3.0 (unreleased)
+### 0.3.0 (2026-11-21)
 
 - New optional `dtype` input on all three loaders (`original`, `bf16`, `fp16`,
   `fp32`) to choose the float type the INT8 values are restored to. The default is
