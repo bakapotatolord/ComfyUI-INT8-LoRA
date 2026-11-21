@@ -18,6 +18,7 @@ Summary of the format (version 1):
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -68,6 +69,15 @@ _DTYPE_NAMES = {
     "bfloat16": torch.bfloat16,
 }
 _DTYPE_BY_TORCH = {v: k for k, v in _DTYPE_NAMES.items()}
+
+# Loaders can restore the quantized tensors to a different float dtype than the
+# one the source used. "original" (None) keeps the dtype recorded in the file.
+RESTORE_DTYPES = {
+    "original": None,
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+    "fp32": torch.float32,
+}
 
 
 # --------------------------------------------------------------------------
@@ -489,10 +499,21 @@ def _validate_metadata(
     return _DTYPE_NAMES[dtype_name], rotation, max_group
 
 
+def restore_dtype(name: str) -> torch.dtype | None:
+    """Map a loader dropdown value to a torch dtype (``None`` means as stored)."""
+    if name not in RESTORE_DTYPES:
+        raise ValueError(f"unknown dtype '{name}'; choose one of {list(RESTORE_DTYPES)}")
+    return RESTORE_DTYPES[name]
+
+
 def load_int8_lora_with_metadata(
-    path: str,
+    path: str, dtype: torch.dtype | None = None
 ) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
     """Load an INT8 LoRA file.
+
+    Quantized tensors are restored to ``dtype``, or to the dtype recorded in the
+    file when ``dtype`` is None. Tensors that were not quantized keep their own
+    dtype.
 
     Returns ``(state_dict, metadata)``: an ordinary float state dict, and the
     source file's original metadata (this format's own ``int8_lora_*`` keys are
@@ -501,7 +522,8 @@ def load_int8_lora_with_metadata(
     out: dict[str, torch.Tensor] = {}
     with safe_open(path, framework="pt", device="cpu") as f:
         header = dict(f.metadata() or {})
-        dtype, rotation, max_group = _validate_metadata(header, path)
+        stored_dtype, rotation, max_group = _validate_metadata(header, path)
+        restore = stored_dtype if dtype is None else dtype
         keys = set(f.keys())
         scale_keys = {k for k in keys if k.endswith(SCALE_SUFFIX)}
 
@@ -516,7 +538,7 @@ def load_int8_lora_with_metadata(
                 if tensor.dtype != torch.int8:
                     raise ValueError(f"{path}: '{key}' has a scale but is {tensor.dtype}")
                 scale = f.get_tensor(scale_key)
-                out[key] = dequantize_absmax(tensor, scale, dtype, rotation, max_group)
+                out[key] = dequantize_absmax(tensor, scale, restore, rotation, max_group)
             else:
                 if tensor.dtype == torch.int8:
                     raise ValueError(f"{path}: int8 tensor '{key}' has no scale")
@@ -580,6 +602,21 @@ def int8_relative_path(name: str) -> str:
     return "/".join([*folders, f"{stem}_int8.safetensors"])
 
 
+def find_int8_counterpart(lora_name: str, int8_names: Iterable[str]) -> str | None:
+    """The INT8 copy of a normal LoRA, as listed in the INT8 folder, or ``None``.
+
+    Looks for the mirrored location first (what the folder node writes:
+    ``styles/a.safetensors`` -> ``styles/a_int8.safetensors``), then for the same
+    file name directly in the INT8 folder (what the single-file node writes).
+    """
+    mirrored = int8_relative_path(lora_name)
+    by_normalized = {_norm(name): name for name in int8_names}
+    for candidate in (mirrored, mirrored.rsplit("/", 1)[-1]):
+        if candidate in by_normalized:
+            return by_normalized[candidate]
+    return None
+
+
 def safetensors_keys(path: str) -> list[str] | None:
     """Tensor names of a safetensors file (reads only the header), or ``None`` if
     the file is not a readable safetensors file."""
@@ -613,17 +650,23 @@ def run_batch(
     names: Iterable[str],
     process: Callable[[str], QuantizeReport],
     on_progress: Callable[[], None] | None = None,
+    reraise: tuple[type[BaseException], ...] = (),
 ) -> list[BatchEntry]:
     """Run ``process(name) -> report`` for every name.
 
     A file that raises is recorded as skipped with the reason and the batch goes
-    on. (ComfyUI's cancel signal derives from ``BaseException``, so it is not
-    caught here and still stops the whole batch.)
+    on. Exceptions whose type is in ``reraise`` are not caught and stop the whole
+    batch. The folder node passes ComfyUI's cancel exception here: newer ComfyUI
+    versions derive it from ``BaseException`` (never caught below anyway), but
+    older ones derive it from ``Exception``, and without ``reraise`` a cancel
+    would be recorded as one skipped file and the batch would carry on.
     """
     entries: list[BatchEntry] = []
     for name in names:
         try:
             entries.append(BatchEntry(name, process(name)))
+        except reraise:
+            raise
         except Exception as exc:
             first_line = (str(exc).splitlines() or [""])[0]
             entries.append(BatchEntry(name, skipped=(first_line or type(exc).__name__)[:160]))
@@ -656,3 +699,18 @@ def format_batch_report(folder: str, entries: list[BatchEntry]) -> str:
             f"({100.0 * after / max(before, 1):.1f}% of original)"
         )
     return "\n".join(lines)
+
+
+def state_signature(paths: Iterable[str]) -> str:
+    """A short string that changes when any of ``paths`` appears, disappears or is
+    modified (its size or modification time). The quantize nodes return it from
+    ``IS_CHANGED`` so ComfyUI re-runs them exactly when the files involved change,
+    and replays the cached result otherwise."""
+    parts = []
+    for path in paths:
+        try:
+            info = os.stat(path)
+            parts.append(f"{path}|{info.st_size}|{info.st_mtime_ns}")
+        except OSError:
+            parts.append(f"{path}|missing")
+    return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()

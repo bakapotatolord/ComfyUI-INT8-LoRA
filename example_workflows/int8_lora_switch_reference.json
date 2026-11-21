@@ -1,0 +1,608 @@
+{
+  "id": "5c6aa510-2dd0-4a84-86a2-441487f88422",
+  "revision": 0,
+  "last_node_id": 18,
+  "last_link_id": 20,
+  "nodes": [
+    {
+      "id": 5,
+      "type": "UNETLoader",
+      "pos": [
+        -913.3113938262007,
+        -1656.3292500182092
+      ],
+      "size": [
+        318.76033057851237,
+        82
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            20
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "moss_image_sft_int8_convrot.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "moss_image_sft_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 6,
+      "type": "KSampler",
+      "pos": [
+        -119.5593277104972,
+        -1600.585448365318
+      ],
+      "size": [
+        270,
+        474
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 18
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 5
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 8
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            12
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        125833983593126,
+        "fixed",
+        8,
+        1,
+        "euler",
+        "simple",
+        1
+      ],
+      "widgets_values_named": {
+        "seed": 125833983593126,
+        "control_after_generate": "fixed",
+        "steps": 8,
+        "cfg": 1,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "denoise": 1
+      }
+    },
+    {
+      "id": 7,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -567.5593277104972,
+        -1424.585448365318
+      ],
+      "size": [
+        400,
+        200
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 19
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            5,
+            7
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "a cute fluffy cat sitting in the center of the frame, holding a large wooden sign with two lines of text: the first line in big letters reads “INT8 LoRA”, the second line in smaller letters reads “1134 MiB → 284 MiB”, centered composition, the sign in the middle of the image with empty dark space above and below, soft studio lighting, clean dark background, sharp focus"
+      ],
+      "widgets_values_named": {
+        "text": "a cute fluffy cat sitting in the center of the frame, holding a large wooden sign with two lines of text: the first line in big letters reads “INT8 LoRA”, the second line in smaller letters reads “1134 MiB → 284 MiB”, centered composition, the sign in the middle of the image with empty dark space above and below, soft studio lighting, clean dark background, sharp focus"
+      }
+    },
+    {
+      "id": 9,
+      "type": "ConditioningZeroOut",
+      "pos": [
+        -376.6267105229972,
+        -1178.585448365318
+      ],
+      "size": [
+        204.134765625,
+        26
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ConditioningZeroOut"
+      }
+    },
+    {
+      "id": 10,
+      "type": "EmptyLatentImage",
+      "pos": [
+        -443.5593277104972,
+        -1109.585448365318
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        896,
+        1152,
+        1
+      ],
+      "widgets_values_named": {
+        "width": 896,
+        "height": 1152,
+        "batch_size": 1
+      }
+    },
+    {
+      "id": 12,
+      "type": "VAEDecode",
+      "pos": [
+        4.4406722895028,
+        -1689.585448365318
+      ],
+      "size": [
+        140,
+        46
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 12
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 14
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            13
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      }
+    },
+    {
+      "id": 13,
+      "type": "SaveImage",
+      "pos": [
+        167.4406722895028,
+        -1599.585448365318
+      ],
+      "size": [
+        497,
+        630
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "ComfyUI"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "ComfyUI"
+      }
+    },
+    {
+      "id": 14,
+      "type": "VAELoader",
+      "pos": [
+        -912.5593277104972,
+        -1527.585448365318
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            14
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "flux2-vae_small.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "flux2-vae_small.safetensors"
+      }
+    },
+    {
+      "id": 15,
+      "type": "CLIPLoader",
+      "pos": [
+        -907.5593277104972,
+        -1427.585448365318
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            17
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "qwen3.5_9b_int8_convrot.safetensors",
+        "moss_image",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3.5_9b_int8_convrot.safetensors",
+        "type": "moss_image",
+        "device": "default"
+      }
+    },
+    {
+      "id": 16,
+      "type": "INT8LoRASwitch",
+      "pos": [
+        -558.0256954115912,
+        -1662.0551478394013
+      ],
+      "size": [
+        293.4458984375,
+        194
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 20
+        },
+        {
+          "name": "clip",
+          "shape": 7,
+          "type": "CLIP",
+          "link": 17
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            18
+          ]
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "links": [
+            19
+          ]
+        },
+        {
+          "name": "info",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "INT8LoRASwitch"
+      },
+      "widgets_values": [
+        "moss_step_loras\\moss_image_8step_dmd2.safetensors",
+        "original",
+        1,
+        1,
+        "bf16"
+      ],
+      "widgets_values_named": {
+        "lora_name": "moss_step_loras\\moss_image_8step_dmd2.safetensors",
+        "mode": "original",
+        "strength": 1,
+        "strength_clip": 1,
+        "dtype": "bf16"
+      }
+    },
+    {
+      "id": 17,
+      "type": "Note",
+      "pos": [
+        -553.3027461928411,
+        -1885.0551478394013
+      ],
+      "size": [
+        359,
+        172
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "Ensure to use Quantize LoRA to INT8 node (on left) and refresh the models ('R' key) so using the mode int8 won't throw an error.\n\ndtype is applicable when mode is int8, default is bf16 which keeps the excess RAM usage to a minimum. Choose original if you want the LoRA to dequantize to original format."
+      ],
+      "widgets_values_named": {
+        "text": "Ensure to use Quantize LoRA to INT8 node (on left) and refresh the models ('R' key) so using the mode int8 won't throw an error.\n\ndtype is applicable when mode is int8, default is bf16 which keeps the excess RAM usage to a minimum. Choose original if you want the LoRA to dequantize to original format."
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 18,
+      "type": "INT8LoRAQuantize",
+      "pos": [
+        -847.3027461928411,
+        -1853.0551478394013
+      ],
+      "size": [
+        270,
+        130
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "INT8LoRAQuantize"
+      },
+      "widgets_values": [
+        "moss_step_loras\\moss_image_8step_dmd2.safetensors",
+        "",
+        "auto",
+        false
+      ],
+      "widgets_values_named": {
+        "lora_name": "moss_step_loras\\moss_image_8step_dmd2.safetensors",
+        "output_name": "",
+        "rotation": "auto",
+        "overwrite": false
+      }
+    }
+  ],
+  "links": [
+    [
+      5,
+      7,
+      0,
+      6,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      7,
+      7,
+      0,
+      9,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      8,
+      9,
+      0,
+      6,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      9,
+      10,
+      0,
+      6,
+      3,
+      "LATENT"
+    ],
+    [
+      12,
+      6,
+      0,
+      12,
+      0,
+      "LATENT"
+    ],
+    [
+      13,
+      12,
+      0,
+      13,
+      0,
+      "IMAGE"
+    ],
+    [
+      14,
+      14,
+      0,
+      12,
+      1,
+      "VAE"
+    ],
+    [
+      17,
+      15,
+      0,
+      16,
+      1,
+      "CLIP"
+    ],
+    [
+      18,
+      16,
+      0,
+      6,
+      0,
+      "MODEL"
+    ],
+    [
+      19,
+      16,
+      1,
+      7,
+      0,
+      "CLIP"
+    ],
+    [
+      20,
+      5,
+      0,
+      16,
+      0,
+      "MODEL"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.9090909090909091,
+      "offset": [
+        1195.5027461928414,
+        2335.255147839401
+      ]
+    },
+    "frontendVersion": "1.59.6"
+  },
+  "version": 0.4
+}

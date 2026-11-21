@@ -1,4 +1,5 @@
 import os
+import pathlib
 import sys
 import tempfile
 import unittest
@@ -455,6 +456,223 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(entries["styles/already.safetensors"].skipped, "already an INT8 LoRA")
         self.assertEqual(entries["styles/model.safetensors"].skipped, "does not look like a LoRA")
         self.assertEqual(entries["styles/old.pt"].skipped, "not a readable .safetensors file")
+
+
+class RestoreDtypeTests(unittest.TestCase):
+    def quantized_file(self, dtype=torch.bfloat16):
+        tensors, meta, _ = core.quantize_state_dict(make_lora(dtype), rotation=core.ROTATION_NONE)
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = os.path.join(d.name, "x.safetensors")
+        core.save_int8_lora(path, tensors, meta)
+        return path
+
+    def load(self, path, dtype=None):
+        return core.load_int8_lora_with_metadata(path, dtype)[0]
+
+    def test_dropdown_values_map_to_dtypes(self):
+        self.assertIsNone(core.restore_dtype("original"))
+        self.assertEqual(core.restore_dtype("bf16"), torch.bfloat16)
+        self.assertEqual(core.restore_dtype("fp16"), torch.float16)
+        self.assertEqual(core.restore_dtype("fp32"), torch.float32)
+        with self.assertRaises(ValueError):
+            core.restore_dtype("fp8")
+
+    def test_default_is_the_stored_dtype(self):
+        path = self.quantized_file(torch.bfloat16)
+        self.assertEqual(self.load(path)["layer.lora_up.weight"].dtype, torch.bfloat16)
+        path = self.quantized_file(torch.float32)
+        self.assertEqual(self.load(path)["layer.lora_up.weight"].dtype, torch.float32)
+
+    def test_every_dtype_can_be_requested(self):
+        path = self.quantized_file(torch.float32)
+        for name, expected in (("bf16", torch.bfloat16), ("fp16", torch.float16), ("fp32", torch.float32)):
+            loaded = self.load(path, core.restore_dtype(name))
+            for key in ("layer.lora_up.weight", "layer.lora_down.weight", "layer2.lokr_w2"):
+                self.assertEqual(loaded[key].dtype, expected, (name, key))
+
+    def test_unquantized_tensors_keep_their_own_dtype(self):
+        path = self.quantized_file(torch.bfloat16)
+        loaded = self.load(path, torch.float16)
+        self.assertEqual(loaded["layer.alpha"].dtype, torch.float32)  # stored as fp32
+        self.assertEqual(loaded["layer3.dora_scale"].dtype, torch.bfloat16)  # not quantized
+        self.assertEqual(loaded["layer2.lokr_w1"].dtype, torch.bfloat16)  # too small to quantize
+
+    def test_lower_precision_is_just_a_cast_of_the_same_values(self):
+        path = self.quantized_file(torch.float32)
+        full = self.load(path, torch.float32)
+        low = self.load(path, torch.bfloat16)
+        for key in ("layer.lora_up.weight", "layer2.lokr_w2"):
+            self.assertTrue(torch.equal(low[key], full[key].to(torch.bfloat16)), key)
+
+    def test_bf16_halves_the_loaded_size_of_an_fp32_lora(self):
+        path = self.quantized_file(torch.float32)
+
+        def size(tensors):
+            return sum(t.numel() * t.element_size() for k, t in tensors.items() if k.endswith(".weight") or "lokr" in k)
+
+        self.assertAlmostEqual(size(self.load(path, torch.bfloat16)) / size(self.load(path)), 0.5, places=2)
+
+
+class LoaderRobustnessTests(unittest.TestCase):
+    """Damaged or unusual files, and how the stored dtype is chosen."""
+
+    def save(self, tensors, meta):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = os.path.join(d.name, "x.safetensors")
+        core.save_int8_lora(path, tensors, meta)
+        return path
+
+    def quantized(self, sd=None, rotation=core.ROTATION_NONE):
+        return core.quantize_state_dict(sd or make_lora(), rotation=rotation)[:2]
+
+    def test_float64_source_is_stored_and_restored_as_float32(self):
+        tensors, meta = self.quantized(make_lora(torch.float64))
+        self.assertEqual(meta[core.META_DTYPE], "float32")
+        loaded = core.load_int8_lora_with_metadata(self.save(tensors, meta))[0]
+        self.assertEqual(loaded["layer.lora_up.weight"].dtype, torch.float32)
+
+    def test_mixed_dtypes_restore_to_the_most_common_one(self):
+        sd = {
+            "a.lora_up.weight": torch.randn(4096, 16).bfloat16(),
+            "a.lora_down.weight": torch.randn(16, 4096).bfloat16(),
+            "b.lora_up.weight": torch.randn(4096, 16).bfloat16(),
+            "b.lora_down.weight": torch.randn(16, 4096),  # the odd one out, fp32
+        }
+        tensors, meta = self.quantized(sd)
+        self.assertEqual(meta[core.META_DTYPE], "bfloat16")
+        loaded = core.load_int8_lora_with_metadata(self.save(tensors, meta))[0]
+        self.assertEqual({t.dtype for t in loaded.values()}, {torch.bfloat16})
+
+    def test_dtype_override_works_with_rotation_too(self):
+        tensors, meta = self.quantized(outlier_lora(), core.ROTATION_CONVROT)
+        path = self.save(tensors, meta)
+        full = core.load_int8_lora_with_metadata(path, torch.float32)[0]
+        low = core.load_int8_lora_with_metadata(path, torch.bfloat16)[0]
+        for key in ("a.lora_up.weight", "a.lora_down.weight"):
+            self.assertTrue(torch.equal(low[key], full[key].to(torch.bfloat16)), key)
+
+    def test_lower_precision_stays_close_to_the_original(self):
+        sd = make_lora(torch.float32)
+        tensors, meta = self.quantized(sd)
+        low = core.load_int8_lora_with_metadata(self.save(tensors, meta), torch.bfloat16)[0]
+        up = sd["layer.lora_up.weight"]
+        err = (low["layer.lora_up.weight"].float() - up).pow(2).sum() / up.pow(2).sum()
+        self.assertLess(float(err), 1e-3)
+
+    def test_square_matrices_use_row_scales(self):
+        # Pins the documented rule: only tall matrices switch to column scales.
+        w = torch.randn(64, 64) * torch.linspace(0.1, 5.0, 64)[:, None]
+        _, scale = core.quantize_absmax(w)
+        self.assertTrue(torch.allclose(scale, w.abs().amax(dim=1) / 127.0))
+
+    def test_scale_of_the_wrong_length_is_rejected(self):
+        tensors, meta = self.quantized()
+        tensors["layer.lora_up.weight" + core.SCALE_SUFFIX] = torch.ones(3)
+        with self.assertRaisesRegex(ValueError, "scale has"):
+            core.load_int8_lora_with_metadata(self.save(tensors, meta))
+
+    def test_a_scaled_tensor_that_is_not_int8_is_rejected(self):
+        tensors, meta = self.quantized()
+        tensors["layer.lora_up.weight"] = tensors["layer.lora_up.weight"].float()
+        with self.assertRaisesRegex(ValueError, "has a scale but is"):
+            core.load_int8_lora_with_metadata(self.save(tensors, meta))
+
+    def test_bad_metadata_values_are_rejected(self):
+        tensors, meta = self.quantized(outlier_lora(), core.ROTATION_CONVROT)
+        for key, value, message in (
+            (core.META_CONVROT_GROUP, "abc", "invalid convrot group"),
+            (core.META_CONVROT_GROUP, "100", "invalid convrot group"),
+            (core.META_DTYPE, "float8", "unsupported stored dtype"),
+        ):
+            with self.assertRaisesRegex(ValueError, message):
+                core.load_int8_lora_with_metadata(self.save(tensors, {**meta, key: value}))
+
+
+class CounterpartTests(unittest.TestCase):
+    def test_mirrored_location_is_preferred_over_the_flat_one(self):
+        names = ["a_int8.safetensors", "styles\\a_int8.safetensors"]
+        self.assertEqual(core.find_int8_counterpart("styles/a.safetensors", names), "styles\\a_int8.safetensors")
+        self.assertEqual(core.find_int8_counterpart("styles\\a.safetensors", names), "styles\\a_int8.safetensors")
+
+    def test_falls_back_to_the_flat_file_name(self):
+        self.assertEqual(
+            core.find_int8_counterpart("styles/deep/b.safetensors", ["b_int8.safetensors"]), "b_int8.safetensors"
+        )
+
+    def test_root_loras_and_other_source_extensions(self):
+        self.assertEqual(core.find_int8_counterpart("root.safetensors", ["root_int8.safetensors"]), "root_int8.safetensors")
+        self.assertEqual(
+            core.find_int8_counterpart("styles\\deep\\b.pt", ["styles/deep/b_int8.safetensors"]),
+            "styles/deep/b_int8.safetensors",
+        )
+
+    def test_no_match_gives_none(self):
+        self.assertIsNone(core.find_int8_counterpart("a.safetensors", []))
+        self.assertIsNone(core.find_int8_counterpart("a.safetensors", ["other_int8.safetensors"]))
+        self.assertIsNone(core.find_int8_counterpart("a.safetensors", ["xa_int8.safetensors"]))  # not a partial name
+        self.assertIsNone(core.find_int8_counterpart("styles/a.safetensors", ["other/a_int8.safetensors"]))
+
+
+class RunBatchCancelTests(unittest.TestCase):
+    class Cancel(Exception):
+        """Like ComfyUI's cancel exception in older versions: derives from Exception."""
+
+    def test_listed_exceptions_stop_the_batch_even_though_they_are_exceptions(self):
+        calls = []
+
+        def process(name):
+            calls.append(name)
+            if name == "b":
+                raise self.Cancel()
+            return core.quantize_state_dict(make_lora())[2]
+
+        with self.assertRaises(self.Cancel):
+            core.run_batch(["a", "b", "c"], process, reraise=(self.Cancel,))
+        self.assertEqual(calls, ["a", "b"])  # "c" never ran
+
+    def test_without_reraise_an_exception_is_only_a_skipped_file(self):
+        def process(name):
+            if name == "b":
+                raise self.Cancel()
+            return core.quantize_state_dict(make_lora())[2]
+
+        entries = core.run_batch(["a", "b", "c"], process)
+        self.assertEqual([bool(e.skipped) for e in entries], [False, True, False])
+
+    def test_other_errors_are_still_skipped_when_reraise_is_set(self):
+        def process(name):
+            if name == "bad":
+                raise ValueError("not a LoRA")
+            return core.quantize_state_dict(make_lora())[2]
+
+        entries = core.run_batch(["a", "bad", "c"], process, reraise=(self.Cancel,))
+        self.assertEqual([e.skipped for e in entries], ["", "not a LoRA", ""])
+
+
+class StateSignatureTests(unittest.TestCase):
+    def test_changes_when_files_appear_change_or_disappear(self):
+        with tempfile.TemporaryDirectory() as d:
+            one, two = os.path.join(d, "one.txt"), os.path.join(d, "two.txt")
+            empty = core.state_signature([one, two])
+            self.assertEqual(empty, core.state_signature([one, two]))  # stable
+            pathlib.Path(one).write_text("a")
+            appeared = core.state_signature([one, two])
+            self.assertNotEqual(appeared, empty)
+            pathlib.Path(one).write_text("longer content")  # different size
+            edited = core.state_signature([one, two])
+            self.assertNotEqual(edited, appeared)
+            os.utime(one, ns=(1_000_000_000, 2_000_000_000))  # same size, different time
+            self.assertNotEqual(core.state_signature([one, two]), edited)
+            os.remove(one)
+            self.assertEqual(core.state_signature([one, two]), empty)
+
+    def test_depends_on_which_paths_are_listed(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, b = os.path.join(d, "a"), os.path.join(d, "b")
+            self.assertNotEqual(core.state_signature([a]), core.state_signature([b]))
+            self.assertEqual(core.state_signature([]), core.state_signature([]))
 
 
 class NameTests(unittest.TestCase):
